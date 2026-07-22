@@ -13,8 +13,15 @@ defmodule Lanyard.Connectivity.Redis do
         do: Application.get_env(:lanyard, :redis_uri),
         else: "redis://#{System.get_env("REDIS_HOST")}:6379"
 
-    {:ok, client} = Redix.start_link(uri)
-    {:ok, conn} = Redix.PubSub.start_link(uri)
+    # Redix connects over IPv4 by default and won't detect IPv6 from a hostname
+    # URI, so force the socket family when REDIS_IPV6 is enabled.
+    opts =
+      if Application.get_env(:lanyard, :redis_inet6),
+        do: [socket_opts: [:inet6]],
+        else: []
+
+    {:ok, client} = Redix.start_link(uri, opts)
+    {:ok, conn} = Redix.PubSub.start_link(uri, opts)
 
     Redix.PubSub.subscribe(conn, "lanyard:global_sync", self())
 
@@ -36,74 +43,87 @@ defmodule Lanyard.Connectivity.Redis do
     case Jason.decode!(payload) do
       %{"node_id" => ^node_id} ->
         # Ignore messages from the same node
+        Lanyard.Metrics.Collector.inc(:counter, :lanyard_global_sync_messages_total, ["ignored"])
         {:noreply, state}
 
       %{"user_id" => uid, "diff" => diff} ->
+        Lanyard.Metrics.Collector.inc(:counter, :lanyard_global_sync_messages_total, ["applied"])
         Presence.sync(uid, diff, true)
         {:noreply, state}
 
       _ ->
+        Lanyard.Metrics.Collector.inc(:counter, :lanyard_global_sync_messages_total, ["invalid"])
         Logger.error("Redis: Unknown payload format: #{inspect(payload)}")
         {:noreply, state}
     end
   end
 
   def handle_call({:hgetall, key}, _from, state) do
-    value = Redix.command(state[:client], ["HGETALL", key])
+    value = command(state[:client], ["HGETALL", key])
 
     {:reply, value, state}
   end
 
   def handle_call({:hget, key, field}, _from, state) do
-    value = Redix.command(state[:client], ["HGET", key, field])
+    value = command(state[:client], ["HGET", key, field])
 
     {:reply, value, state}
   end
 
   def handle_call({:get, key}, _from, state) do
-    value = Redix.command(state[:client], ["GET", key])
+    value = command(state[:client], ["GET", key])
 
     {:reply, value, state}
   end
 
   def handle_cast({:set, key, value}, state) do
-    Redix.command(state.client, ["SET", key, value])
+    command(state.client, ["SET", key, value])
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:mset, list}, state) do
+    command(state.client, ["MSET" | list])
 
     {:noreply, state}
   end
 
   def handle_cast({:del, key}, state) do
-    Redix.command(state.client, ["DEL", key])
+    command(state.client, ["DEL", key])
 
     {:noreply, state}
   end
 
   def handle_cast({:hset, key, valuepairs}, state) do
-    Redix.command(state.client, Enum.concat(["HSET", key], valuepairs))
+    command(state.client, Enum.concat(["HSET", key], valuepairs))
 
     {:noreply, state}
   end
 
   def handle_cast({:hincrby, key, field, amount}, state) do
-    Redix.command(state.client, ["HINCRBY", key, field, amount])
+    command(state.client, ["HINCRBY", key, field, amount])
 
     {:noreply, state}
   end
 
   def handle_cast({:hdel, key, field}, state) do
-    Redix.command(state.client, ["HDEL", key, field])
+    command(state.client, ["HDEL", key, field])
 
     {:noreply, state}
   end
 
   def handle_cast({:publish, channel, message}, state) do
-    Redix.command(state.client, ["PUBLISH", channel, message])
+    command(state.client, ["PUBLISH", channel, message])
 
     {:noreply, state}
   end
 
   def set(key, value) do
     GenServer.cast(:local_redis_client, {:set, key, value})
+  end
+
+  def mset(list) do
+    GenServer.cast(:local_redis_client, {:mset, list})
   end
 
   def del(key) do
@@ -148,6 +168,33 @@ defmodule Lanyard.Connectivity.Redis do
 
   def publish(channel, message) do
     GenServer.cast(:local_redis_client, {:publish, channel, message})
+  end
+
+  defp command(client, [cmd | _] = args) do
+    cmd = String.downcase(cmd)
+    start = System.monotonic_time()
+    result = Redix.command(client, args)
+
+    elapsed =
+      System.convert_time_unit(System.monotonic_time() - start, :native, :microsecond) /
+        1_000_000
+
+    status =
+      case result do
+        {:ok, _} -> "ok"
+        _ -> "error"
+      end
+
+    Lanyard.Metrics.Collector.inc(:counter, :lanyard_redis_commands_total, [cmd, status])
+
+    Lanyard.Metrics.Collector.observe(
+      :histogram,
+      :lanyard_redis_command_duration_seconds,
+      [cmd],
+      elapsed
+    )
+
+    result
   end
 
   defp normalize_kv(l) do

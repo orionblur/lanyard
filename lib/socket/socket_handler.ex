@@ -43,6 +43,7 @@ defmodule Lanyard.SocketHandler do
         case json["op"] do
           2 ->
             if json["d"] == nil || !is_map(json["d"]) || map_size(json["d"]) == 0 do
+              Lanyard.Metrics.Collector.inc(:counter, :lanyard_socket_closes_total, ["4005"])
               {:stop, :normal, {4005, "requires_data_object"}, state}
             else
               init_state =
@@ -78,10 +79,14 @@ defmodule Lanyard.SocketHandler do
                         [id | acc]
                       end)
 
-                    :ets.insert(
-                      :global_subscribers,
-                      {"subscribers", [self() | get_global_subscriber_list()]}
-                    )
+                    global_subscribers = get_global_subscriber_list()
+
+                    unless self() in global_subscribers do
+                      :ets.insert(
+                        :global_subscribers,
+                        {"subscribers", [self() | global_subscribers]}
+                      )
+                    end
 
                     Process.flag(:trap_exit, true)
 
@@ -92,8 +97,22 @@ defmodule Lanyard.SocketHandler do
                 end
 
               if init_state == nil do
+                Lanyard.Metrics.Collector.inc(:counter, :lanyard_socket_closes_total, ["4006"])
                 {:stop, :normal, {4006, "invalid_payload"}, state}
               else
+                sub_type =
+                  case json["d"] do
+                    %{"subscribe_to_ids" => _} -> "ids"
+                    %{"subscribe_to_id" => _} -> "single"
+                    %{"subscribe_to_all" => true} -> "all"
+                    _ -> "invalid"
+                  end
+
+                Lanyard.Metrics.Collector.inc(:counter, :lanyard_socket_inits_total, [
+                  sub_type,
+                  Atom.to_string(state.compression)
+                ])
+
                 {:reply, :ok,
                  construct_socket_msg(state.compression, %{op: 0, t: "INIT_STATE", d: init_state}),
                  state}
@@ -107,21 +126,57 @@ defmodule Lanyard.SocketHandler do
           # Unsubscribe
           4 ->
             case json["d"] do
-              %{"unsubscribe_from_id" => id} ->
-                {:ok, pid} = GenRegistry.lookup(Lanyard.Presence, id)
+              %{"unsubscribe_from_ids" => ids} when is_list(ids) ->
+                Enum.each(ids, fn id ->
+                  case GenRegistry.lookup(Lanyard.Presence, id) do
+                    {:ok, pid} ->
+                      if Process.alive?(pid) do
+                        send(pid, {:remove_subscriber, self()})
+                      end
 
-                unless not Process.alive?(pid) do
-                  send(pid, {:remove_subscriber, pid})
+                    _ ->
+                      nil
+                  end
+                end)
+
+              %{"unsubscribe_from_id" => id} ->
+                case GenRegistry.lookup(Lanyard.Presence, id) do
+                  {:ok, pid} ->
+                    if Process.alive?(pid) do
+                      send(pid, {:remove_subscriber, self()})
+                    end
+
+                  _ ->
+                    nil
                 end
+
+              %{"unsubscribe_from_all" => true} ->
+                :ets.insert(
+                  :global_subscribers,
+                  {"subscribers", List.delete(get_global_subscriber_list(), self())}
+                )
+
+                GenRegistry.reduce(Lanyard.Presence, nil, fn {_id, pid}, _acc ->
+                  if Process.alive?(pid) do
+                    send(pid, {:remove_subscriber, self()})
+                  end
+
+                  nil
+                end)
+
+              _ ->
+                nil
             end
 
             {:ok, state}
 
           _ ->
+            Lanyard.Metrics.Collector.inc(:counter, :lanyard_socket_closes_total, ["4004"])
             {:stop, :normal, {4004, "unknown_opcode"}, state}
         end
 
       _ ->
+        Lanyard.Metrics.Collector.inc(:counter, :lanyard_socket_closes_total, ["4006"])
         {:stop, :normal, {4006, "invalid_payload"}, state}
     end
   end
