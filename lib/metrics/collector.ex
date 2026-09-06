@@ -50,7 +50,14 @@ defmodule Lanyard.Metrics.Collector do
       name: :lanyard_4xx_responses,
       registry: @registry,
       labels: [],
-      help: "4xx http responses"
+      help: "4xx http responses, excluding 404 (see lanyard_404_responses)"
+    )
+
+    Counter.new(
+      name: :lanyard_404_responses,
+      registry: @registry,
+      labels: [],
+      help: "404 http responses - mostly lookups for users not being monitored, not failures"
     )
 
     Counter.new(

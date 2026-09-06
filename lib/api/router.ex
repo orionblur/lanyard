@@ -48,6 +48,9 @@ defmodule Lanyard.Api.Router do
           conn.status >= 300 && conn.status < 400 ->
             :lanyard_3xx_responses
 
+          conn.status == 404 ->
+            :lanyard_404_responses
+
           conn.status >= 400 && conn.status < 500 ->
             :lanyard_4xx_responses
 
