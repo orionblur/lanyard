@@ -31,3 +31,4 @@ lanyard-*.tar
 dump.rdb
 
 .DS_Store
+.idea/
