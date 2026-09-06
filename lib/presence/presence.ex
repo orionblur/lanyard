@@ -276,15 +276,12 @@ defmodule Lanyard.Presence do
       if has_presence? do
         %Lanyard.Presence.PrettyPresence{
           discord_user: raw_data.discord_user,
-          discord_status: presence["status"],
-          active_on_discord_web: Map.has_key?(Map.get(presence, "client_status", %{}), "web"),
-          active_on_discord_desktop:
-            Map.has_key?(Map.get(presence, "client_status", %{}), "desktop"),
-          active_on_discord_mobile:
-            Map.has_key?(Map.get(presence, "client_status", %{}), "mobile"),
-          active_on_discord_embedded:
-            Map.has_key?(Map.get(presence, "client_status", %{}), "embedded"),
-          active_on_discord_vr: Map.has_key?(Map.get(presence, "client_status", %{}), "vr"),
+          discord_status: raw_data.discord_presence["status"],
+          active_on_discord_web: Map.has_key?(raw_data.discord_presence["client_status"], "web"),
+          active_on_discord_desktop: Map.has_key?(raw_data.discord_presence["client_status"], "desktop"),
+          active_on_discord_mobile: Map.has_key?(raw_data.discord_presence["client_status"], "mobile"),
+          active_on_discord_embedded: Map.has_key?(raw_data.discord_presence["client_status"], "embedded"),
+          active_on_discord_vr: Map.has_key?(raw_data.discord_presence["client_status"], "vr"),
           listening_to_spotify: spotify_activity !== nil,
           spotify: Spotify.build_pretty_spotify(spotify_activity),
           activities: Activity.build_pretty_activities(presence["activities"]),
